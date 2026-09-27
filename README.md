@@ -77,6 +77,29 @@ pytest -q                                 # 20 deterministic unit tests (no API 
 python -m eval.run_eval                   # behavioural KPI eval (live with a key; deterministic checks without)
 adk eval smart_home_agent eval/smart_home.evalset.json   # ADK-native trajectory eval
 ```
+## Deployment (GKE Autopilot)
+
+DRAG_VIDEO_HERE
+
+The agent runs as a container on GKE Autopilot. All infrastructure is Terraform.
+
+- **Infra as code:** Terraform provisions Artifact Registry, the Autopilot cluster, a runtime service account and IAM.
+- **No API keys in the cluster:** Gemini is called through Vertex AI using Workload Identity. The Kubernetes service account impersonates a GCP service account with `roles/aiplatform.user`.
+- **Build:** Cloud Build produces the image, so no local Docker is needed. The container runs as a non-root user.
+- **Deploy:** `deploy.sh` builds, pushes, applies the manifests and waits for rollout.
+
+### What the demo shows
+- Tool calls in order: `search_products`, then `get_upsell_suggestions`, then the grounded answer
+- The wiring question blocked by the deterministic guardrail (`guardrail_triggered` in session state)
+- Traces: about 9 s end to end, with tools at 1 s and 2 ms. Most of the latency is the model calls, so streaming is the next step.
+
+### Things that broke on the way (and fixes)
+- **ADK origin check returned 403 on session creation:** made `--allow_origins` configurable via an `ALLOW_ORIGINS` env var.
+- **Non-root container couldn't write ADK's runtime UI config:** gave the app user ownership of that one directory instead of running as root.
+- **`gemini-flash-latest` returned 404 in europe-west3 on Vertex:** switched to the `global` endpoint. Pinning an explicit model version is the next step.
+- **Catalogue path was relative to the working directory:** copied `data/` into the image to match the loader.
+
+The cluster is torn down when not in use to avoid cost. Redeploy with `terraform apply && ./deploy.sh`.
 
 ## Evaluation
 
