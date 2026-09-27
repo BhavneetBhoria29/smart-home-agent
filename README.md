@@ -6,77 +6,10 @@ The core idea is a clean split of responsibility. The LLM works out what the use
 
 Most of the interesting work sits in the data layer, not the prompt. The export buries supported voice assistants inside a free-text German attributes blob, so I wrote an ingestion parser that mines them out and normalises them to a validated set of Alexa, Google Assistant and Siri. I checked it against the whole catalogue, 561 products with a valid assistant, reconciled against a raw scan. Retrieval is a structured filter first, then BM25: compatibility, category and price are hard constraints applied before ranking, so a requirement never gets ranked away. BM25 rather than vectors because the catalogue is small and the queries are keyword-ish, with a dense reranker as the documented path if it ever needs to scale.
 
-The brief grades creativity, so to be explicit: I read that as product thinking, not architectural complexity. Two things I treated as product decisions rather than features. Upsell is the primary business metric, so I instrument it as an attach rate in the eval harness instead of leaving it as an untested line in a prompt. And safety spends zero tokens: a deterministic pre-model check hard-blocks wiring and installation questions in both English and German before the model is ever called, which is cheaper and impossible to prompt-inject around.
+Two things I treated as product decisions rather than features : I read that as product thinking, not architectural complexity. Two things I treated as product decisions rather than features. Upsell is the primary business metric, so I instrument it as an attach rate in the eval harness instead of leaving it as an untested line in a prompt. And safety spends zero tokens: a deterministic pre-model check hard-blocks wiring and installation questions in both English and German before the model is ever called, which is cheaper and impossible to prompt-inject around.
 
 I come from a LangGraph background, and ADK's shared-state, tool-calling model mapped straight onto the same way of thinking, here as a single coordinator agent with typed tools and a lifecycle callback.
-
-## Architecture
-
-```
-   user turn ──►  before_model_callback  ──►  root LlmAgent (Gemini)  ──►  typed tools  ──►  in-memory catalog
-   (EN or DE)     deterministic safety         detects language,            search /            (943 products,
-                  guardrail: blocks            grounds every answer         check_compatibility  loaded once,
-                  wiring/installation          in tool output,              compare / upsell     compatibility
-                  before a token is spent      enforces upsell + domain                          parsed at load)
-```
-
-**Core principle:** the LLM decides *what the user wants*; deterministic Python tools decide
-*the facts*. Compatibility, comparison and upsell selection are computed in code, never by the
-model — this is what makes compatibility correct and auditable instead of a hallucination risk.
-
-### Key design decisions
-
-- **Compatibility is parsed, not guessed.** The raw export stores supported voice assistants
-  inside a free-text German `attributes` blob. An ingestion parser extracts and normalises them
-  to a validated set {Amazon Alexa, Google Assistant, Apple Siri}. Verified against the full
-  catalogue (561 products with a valid voice assistant; counts reconciled against a raw scan).
-- **Retrieval = structured filter first, then BM25.** Compatibility, category and price are hard
-  filters applied before ranking, so a constraint is never ranked away. Only the fuzzy free-text
-  part of a query is ranked. BM25 (not vectors) because the catalogue is small and queries are
-  keyword-ish; a dense reranker is the documented scale-up path.
-- **Category is derived** from title keywords (the source has no category field). ~25% fall into
-  an honest `other` bucket (hubs, actuators, sirens, miscellaneous) rather than being force-fit.
-- **Upsell is derived and measured.** No upsell field exists in the data, so upgrades are pricier
-  same-category compatible products and add-ons are cheaper same-category items. Upsell is the
-  primary KPI and is reported as an attach rate by the eval harness.
-- **Two-layer guardrails.** A deterministic `before_model_callback` hard-blocks electrical wiring
-  questions (EN + DE) before spending a token, matching on word-stems and token boundaries so
-  German separable verbs and conjugated forms are caught; the agent instruction handles softer
-  semantic domain-deflection. Code-level filters can't be prompt-injected around; instruction handles the
-  long tail.
-- **Single coordinator agent + tools**, not a multi-agent tree — three intents over one bounded
-  catalogue don't justify orchestration overhead, and a single agent is far easier to evaluate.
-
-## Setup & run
-
-Requires Python >= 3.10.
-
-```
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-
-# product data: unzip the export into data/products/ (one JSON per product)
-#   the loader reads data/products/info/*.json and skips macOS junk files
-
-# auth: create smart_home_agent/.env with a Google AI Studio key
-#   GOOGLE_GENAI_USE_VERTEXAI=FALSE
-#   GOOGLE_API_KEY=your-key           (from https://aistudio.google.com/apikey)
-```
-
-Run the assistant:
-
-```
-adk web                                   # ADK web UI - pick "root_agent"; best for inspecting tool traces
-streamlit run app/streamlit_app.py        # or the Streamlit chat UI
-```
-
-Tests and evaluation:
-
-```
-pytest -q                                 # 20 deterministic unit tests (no API key needed)
-python -m eval.run_eval                   # behavioural KPI eval (live with a key; deterministic checks without)
-adk eval smart_home_agent eval/smart_home.evalset.json   # ADK-native trajectory eval
-```
+Deployed on GKE Autopilot with Terraform and Vertex AI via Workload Identity. Demo video in Deployment.
 ## Deployment (GKE Autopilot)
 
 
@@ -104,6 +37,74 @@ The agent runs as a container on GKE Autopilot. All infrastructure is Terraform.
 - **Catalogue path was relative to the working directory:** copied `data/` into the image to match the loader.
 
 The cluster is torn down when not in use to avoid cost. Redeploy with `terraform apply && ./deploy.sh`.
+
+## Architecture
+
+```
+   user turn ──►  before_model_callback  ──►  root LlmAgent (Gemini)  ──►  typed tools  ──►  in-memory catalog
+   (EN or DE)     deterministic safety         detects language,            search /            (943 products,
+                  guardrail: blocks            grounds every answer         check_compatibility  loaded once,
+                  wiring/installation          in tool output,              compare / upsell     compatibility
+                  before a token is spent      enforces upsell + domain                          parsed at load)
+```
+
+**Core principle:** the LLM decides *what the user wants*; deterministic Python tools decide
+*the facts*. Compatibility, comparison and upsell selection are computed in code, never by the
+model this is what makes compatibility correct and auditable instead of a hallucination risk.
+
+### Key design decisions
+
+- **Compatibility is parsed, not guessed.** The raw export stores supported voice assistants
+  inside a free-text German `attributes` blob. An ingestion parser extracts and normalises them
+  to a validated set {Amazon Alexa, Google Assistant, Apple Siri}. Verified against the full
+  catalogue (561 products with a valid voice assistant; counts reconciled against a raw scan).
+- **Retrieval = structured filter first, then BM25.** Compatibility, category and price are hard
+  filters applied before ranking, so a constraint is never ranked away. Only the fuzzy free-text
+  part of a query is ranked. BM25 (not vectors) because the catalogue is small and queries are
+  keyword-ish; a dense reranker is the documented scale-up path.
+- **Category is derived** from title keywords (the source has no category field). ~25% fall into
+  an honest `other` bucket (hubs, actuators, sirens, miscellaneous) rather than being force-fit.
+- **Upsell is derived and measured.** No upsell field exists in the data, so upgrades are pricier
+  same-category compatible products and add-ons are cheaper same-category items. Upsell is the
+  primary KPI and is reported as an attach rate by the eval harness.
+- **Two-layer guardrails.** A deterministic `before_model_callback` hard-blocks electrical wiring
+  questions (EN + DE) before spending a token, matching on word-stems and token boundaries so
+  German separable verbs and conjugated forms are caught; the agent instruction handles softer
+  semantic domain-deflection. Code-level filters can't be prompt-injected around; instruction handles the
+  long tail.
+- **Single coordinator agent + tools**, not a multi-agent tree three intents over one bounded
+  catalogue don't justify orchestration overhead, and a single agent is far easier to evaluate.
+
+## Setup & run
+
+Requires Python >= 3.10.
+
+```
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+# product data: unzip the export into data/products/ (one JSON per product)
+#   the loader reads data/products/info/*.json and skips macOS junk files
+
+# auth: create smart_home_agent/.env with a Google AI Studio key
+#   GOOGLE_GENAI_USE_VERTEXAI=FALSE
+#   GOOGLE_API_KEY=your-key           (from https://aistudio.google.com/apikey)
+```
+
+Run the assistant:
+
+```
+adk web                                   # pick "smart_home_agent";
+streamlit run app/streamlit_app.py        # or the Streamlit chat UI
+```
+
+Tests and evaluation:
+
+```
+pytest -q                                 # 20 deterministic unit tests (no API key needed)
+python -m eval.run_eval                   # behavioural KPI eval (live with a key; deterministic checks without)
+adk eval smart_home_agent eval/smart_home.evalset.json   # ADK-native trajectory eval
+```
 
 ## Evaluation
 
