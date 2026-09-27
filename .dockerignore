@@ -1,0 +1,12 @@
+.git
+.venv
+venv
+__pycache__
+*.pyc
+.env
+terraform/
+k8s/
+*.tfstate*
+.terraform/
+tests/
+eval/

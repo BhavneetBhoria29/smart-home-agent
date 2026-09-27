@@ -39,7 +39,9 @@ spec:
             - name: GOOGLE_CLOUD_PROJECT
               value: ${PROJECT_ID}
             - name: GOOGLE_CLOUD_LOCATION
-              value: ${REGION}
+              value: global
+            - name: ALLOW_ORIGINS
+              value: http://34.179.235.210.nip.io
           resources:
             requests:
               cpu: 500m

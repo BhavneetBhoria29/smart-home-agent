@@ -8,3 +8,9 @@ venv/
 .mypy_cache/
 .ipynb_checkpoints/
 *.log
+
+.env
+.terraform/
+*.tfstate*
+terraform.tfvars
+sha.zip
