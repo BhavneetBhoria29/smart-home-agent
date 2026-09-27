@@ -79,7 +79,11 @@ adk eval smart_home_agent eval/smart_home.evalset.json   # ADK-native trajectory
 ```
 ## Deployment (GKE Autopilot)
 
-DRAG_VIDEO_HERE
+
+
+https://github.com/user-attachments/assets/0cd8c939-5869-43d3-8937-6712735063fa
+
+
 
 The agent runs as a container on GKE Autopilot. All infrastructure is Terraform.
 
