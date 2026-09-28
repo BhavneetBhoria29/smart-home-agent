@@ -6,7 +6,7 @@ The core idea is a clean split of responsibility. The LLM works out what the use
 
 Most of the interesting work sits in the data layer, not the prompt. The export buries supported voice assistants inside a free-text German attributes blob, so I wrote an ingestion parser that mines them out and normalises them to a validated set of Alexa, Google Assistant and Siri. I checked it against the whole catalogue, 561 products with a valid assistant, reconciled against a raw scan. Retrieval is a structured filter first, then BM25: compatibility, category and price are hard constraints applied before ranking, so a requirement never gets ranked away. BM25 rather than vectors because the catalogue is small and the queries are keyword-ish, with a dense reranker as the documented path if it ever needs to scale.
 
-Two things I treated as product decisions rather than features : I read that as product thinking, not architectural complexity. Two things I treated as product decisions rather than features. Upsell is the primary business metric, so I instrument it as an attach rate in the eval harness instead of leaving it as an untested line in a prompt. And safety spends zero tokens: a deterministic pre-model check hard-blocks wiring and installation questions in both English and German before the model is ever called, which is cheaper and impossible to prompt-inject around.
+Two things I treated as product decisions rather than features. Upsell is the primary business metric, so I instrument it as an attach rate in the eval harness instead of leaving it as an untested line in a prompt. And safety spends zero tokens: a deterministic pre-model check hard-blocks wiring and installation questions in both English and German before the model is ever called, which is cheaper and impossible to prompt-inject around.
 
 I come from a LangGraph background, and ADK's shared-state, tool-calling model mapped straight onto the same way of thinking, here as a single coordinator agent with typed tools and a lifecycle callback.
 Deployed on GKE Autopilot with Terraform and Vertex AI via Workload Identity. Demo video in Deployment.
@@ -28,7 +28,7 @@ The agent runs as a container on GKE Autopilot. All infrastructure is Terraform.
 ### What the demo shows
 - Tool calls in order: `search_products`, then `get_upsell_suggestions`, then the grounded answer
 - The wiring question blocked by the deterministic guardrail (`guardrail_triggered` in session state)
-- Traces: about 9 s end to end, with tools at 1 s and 2 ms. Most of the latency is the model calls, so streaming is the next step.
+- Traces: about 9 s end to end, with the tools taking 1 to 2 ms. Most of the latency is the model calls, so streaming is the next step.
 
 ### Things that broke on the way (and fixes)
 - **ADK origin check returned 403 on session creation:** made `--allow_origins` configurable via an `ALLOW_ORIGINS` env var.
@@ -101,22 +101,68 @@ streamlit run app/streamlit_app.py        # or the Streamlit chat UI
 Tests and evaluation:
 
 ```
-pytest -q                                 # 20 deterministic unit tests (no API key needed)
-python -m eval.run_eval                   # behavioural KPI eval (live with a key; deterministic checks without)
+pytest -q                                 # 26 deterministic unit tests (no API key needed)
+python -m eval.run_golden --offline       # guardrail sweep + catalogue-wide invariants (no API key)
+python -m eval.run_golden --runs 3        # full golden-set eval against live Gemini (Vertex or AI Studio)
 adk eval smart_home_agent eval/smart_home.evalset.json   # ADK-native trajectory eval
 ```
 
 ## Evaluation
 
-Two complementary layers:
+`eval/run_golden.py` scores the agent in three layers and reports n next to every number.
 
-1. **`eval/run_eval.py` - business-KPI harness.** Scores compatibility correctness, guardrail
-   block rate, language match, and **upsell attach rate** (the primary KPI). In a live run the
-   upsell attach rate was **100%** on recommendation turns. (Note: the Google AI free tier caps
-   daily requests, so a full live run may be quota-limited; the deterministic unit tests cover the
-   same invariants without an API key.)
-2. **`eval/smart_home.evalset.json` - ADK-native trajectory eval** for `adk eval`, checking the
-   agent calls the right tools. Cleanly regenerated via the "Save as eval case" button in `adk web`.
+**1. Guardrail sweep (offline).** 40 labelled EN/DE prompts, half of them hard negatives
+("wireless doorbell", "install the app", "Zwischenstecker für die Steckdose").
+
+| | Result |
+|---|---|
+| Wiring questions blocked | 19/20 |
+| Safe questions wrongly blocked | 1/20 |
+
+Known misses, kept visible on purpose: "hooking up the circuit" is not caught, and "smart plug
+outlet ... connect to Google" is over-blocked (electrical noun + connect verb in one sentence).
+
+**2. Catalogue-wide invariants (offline).** Every ecosystem-filtered search and every upsell
+across the catalogue is checked for incompatible products: 0/180 search results and
+0/3,217 upsell suggestions (over 561 base products) are incompatible.
+
+**3. Live agent eval.** 24 EN/DE cases (recommend, compare, hard block, off-topic deflection,
+compatibility question), each run 3 times against Gemini on Vertex AI, so n = 72.
+
+| Metric | Baseline | After fixes |
+|---|---|---|
+| Tool trajectory (right tools, right order) | 70/72 | 72/72 |
+| Upsell attach (primary KPI) | 34/36 | 36/36 |
+| Compatibility of named products | 42/42 | 42/42 |
+| Grounding (named products came from a tool) | 46/47 | 48/48 |
+| Hard guardrail | 12/12 | 12/12 |
+| Off-topic deflection | 12/12 | 12/12 |
+| Reply language matches user | **52/72** | **72/72** |
+| Latency p50 / p95 | 7.7 s / 12.4 s | 8.4 s / 12.8 s |
+
+What the eval caught:
+
+- **Silent compatibility bug for Siri users.** `resolve_ecosystem("Apple Siri")` returned
+  `None`, so `search_products` quietly dropped the filter and 36 of 180 Siri results did not
+  support Siri. Fixed (missing alias, and an unknown ecosystem now errors instead of searching
+  unfiltered), with regression tests.
+- **Language drift after tool calls.** German questions were answered in German every time, but
+  English questions that triggered a tool call were answered in English only 7/27 times: the
+  German catalogue data in tool results pulled the model into German. The prompt rule alone did
+  not hold, so the `before_model_callback` now detects the user's language in code and pins it
+  in the system instruction on every model call, same principle as compatibility.
+- **Duplicate titles.** 370 products share a title with another product, sometimes with
+  different compatibility data, so a title alone does not identify a product. Grounding and
+  compatibility are therefore checked against what the tools actually returned.
+
+Caveats: 24 cases is a small, hand-written set; language is detected with a stopword heuristic;
+upsell attach measures that the tool was called, not that the suggestion was relevant (an
+LLM-as-judge on relevance is the next step). Per-run replies and tool calls are written to
+`eval/results.json`.
+
+`eval/run_eval.py` (the original 6-scenario harness) and `eval/smart_home.evalset.json`
+(hand-authored `adk eval` cases, best regenerated via "Save as eval case" in `adk web`) are kept
+for reference.
 
 ## Project layout
 
@@ -131,7 +177,7 @@ smart_home_agent/
   guardrails/callbacks.py  before_model_callback safety guardrail (EN/DE)
 data/products/          product JSONs
 eval/                   run_eval.py (KPI harness) + smart_home.evalset.json (ADK eval)
-tests/test_tools.py     20 unit tests for the deterministic layer
+tests/test_tools.py     26 unit tests for the deterministic layer
 app/streamlit_app.py    minimal Streamlit chat UI
 ```
 
