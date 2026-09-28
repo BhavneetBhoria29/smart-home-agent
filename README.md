@@ -10,6 +10,8 @@ Two things I treated as product decisions rather than features. Upsell is the pr
 
 I come from a LangGraph background, and ADK's shared-state, tool-calling model mapped straight onto the same way of thinking, here as a single coordinator agent with typed tools and a lifecycle callback.
 Deployed on GKE Autopilot with Terraform and Vertex AI via Workload Identity. Demo video in Deployment.
+
+It is evaluated on a golden set of 24 EN/DE cases run 3 times each (n = 72) plus catalogue-wide offline checks. The eval caught two real bugs, a silent Siri compatibility bug and English replies drifting into German after tool calls, and both are fixed in code. Numbers are in [Evaluation](#evaluation).
 ## Deployment (GKE Autopilot)
 
 
@@ -42,15 +44,15 @@ The cluster is torn down when not in use to avoid cost. Redeploy with `terraform
 
 ```
    user turn ──►  before_model_callback  ──►  root LlmAgent (Gemini)  ──►  typed tools  ──►  in-memory catalog
-   (EN or DE)     deterministic safety         detects language,            search /            (943 products,
-                  guardrail: blocks            grounds every answer         check_compatibility  loaded once,
-                  wiring/installation          in tool output,              compare / upsell     compatibility
-                  before a token is spent      enforces upsell + domain                          parsed at load)
+   (EN or DE)     detects + pins reply         grounds every answer         search /            (943 products,
+                  language; blocks wiring/     in tool output,              check_compatibility  loaded once,
+                  installation before a        enforces upsell + domain     compare / upsell     compatibility
+                  token is spent                                                                 parsed at load)
 ```
 
 **Core principle:** the LLM decides *what the user wants*; deterministic Python tools decide
 *the facts*. Compatibility, comparison and upsell selection are computed in code, never by the
-model this is what makes compatibility correct and auditable instead of a hallucination risk.
+model. This is what makes compatibility correct and auditable instead of a hallucination risk.
 
 ### Key design decisions
 
@@ -72,7 +74,7 @@ model this is what makes compatibility correct and auditable instead of a halluc
   German separable verbs and conjugated forms are caught; the agent instruction handles softer
   semantic domain-deflection. Code-level filters can't be prompt-injected around; instruction handles the
   long tail.
-- **Single coordinator agent + tools**, not a multi-agent tree three intents over one bounded
+- **Single coordinator agent + tools**, not a multi-agent tree: three intents over one bounded
   catalogue don't justify orchestration overhead, and a single agent is far easier to evaluate.
 
 ## Setup & run
@@ -86,9 +88,16 @@ pip install -r requirements.txt
 # product data: unzip the export into data/products/ (one JSON per product)
 #   the loader reads data/products/info/*.json and skips macOS junk files
 
-# auth: create smart_home_agent/.env with a Google AI Studio key
-#   GOOGLE_GENAI_USE_VERTEXAI=FALSE
-#   GOOGLE_API_KEY=your-key           (from https://aistudio.google.com/apikey)
+# auth, option A: Vertex AI (recommended, no free-tier quota)
+#   gcloud auth application-default login
+#   smart_home_agent/.env:
+#     GOOGLE_GENAI_USE_VERTEXAI=TRUE
+#     GOOGLE_CLOUD_PROJECT=your-project
+#     GOOGLE_CLOUD_LOCATION=global
+# auth, option B: Google AI Studio key
+#   smart_home_agent/.env:
+#     GOOGLE_GENAI_USE_VERTEXAI=FALSE
+#     GOOGLE_API_KEY=your-key         (from https://aistudio.google.com/apikey)
 ```
 
 Run the assistant:
@@ -104,7 +113,7 @@ Tests and evaluation:
 pytest -q                                 # 26 deterministic unit tests (no API key needed)
 python -m eval.run_golden --offline       # guardrail sweep + catalogue-wide invariants (no API key)
 python -m eval.run_golden --runs 3        # full golden-set eval against live Gemini (Vertex or AI Studio)
-adk eval smart_home_agent eval/smart_home.evalset.json   # ADK-native trajectory eval
+adk eval smart_home_agent eval/smart_home.evalset.json   # ADK-native trajectory eval (hand-authored cases, see below)
 ```
 
 ## Evaluation
@@ -140,6 +149,10 @@ compatibility question), each run 3 times against Gemini on Vertex AI, so n = 72
 | Reply language matches user | **52/72** | **72/72** |
 | Latency p50 / p95 | 7.7 s / 12.4 s | 8.4 s / 12.8 s |
 
+Only the language fix targeted a metric. Upsell attach and trajectory moved by the same 2 runs,
+both turns where the model listed several options and asked the user to choose instead of
+committing to one product. No upsell change was made, so treat that difference as run-to-run noise.
+
 What the eval caught:
 
 - **Silent compatibility bug for Siri users.** `resolve_ecosystem("Apple Siri")` returned
@@ -174,9 +187,9 @@ smart_home_agent/
   catalog/retrieval.py  structured filter + BM25 ranking
   tools/recommend.py    search_products, check_compatibility, get_upsell_suggestions
   tools/compare.py      compare_products
-  guardrails/callbacks.py  before_model_callback safety guardrail (EN/DE)
+  guardrails/callbacks.py  before_model_callback: language pinning + safety guardrail (EN/DE)
 data/products/          product JSONs
-eval/                   run_eval.py (KPI harness) + smart_home.evalset.json (ADK eval)
+eval/                   run_golden.py (golden-set eval); run_eval.py + smart_home.evalset.json (earlier)
 tests/test_tools.py     26 unit tests for the deterministic layer
 app/streamlit_app.py    minimal Streamlit chat UI
 ```
