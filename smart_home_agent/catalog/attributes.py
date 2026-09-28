@@ -27,7 +27,7 @@ ECOSYSTEM_ALIASES = {
     "google": "Google Assistant", "google home": "Google Assistant",
     "google assistant": "Google Assistant", "nest": "Google Assistant",
     "apple": "Apple Siri", "siri": "Apple Siri", "homekit": "Apple Siri",
-    "apple homekit": "Apple Siri",
+    "apple homekit": "Apple Siri", "apple siri": "Apple Siri",
 }
 
 VOICE_KEY = "Unterstützte Sprachsteuerung"

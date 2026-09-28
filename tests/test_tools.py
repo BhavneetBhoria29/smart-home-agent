@@ -157,3 +157,66 @@ def test_guardrail_allows_wireless_not_wire():
 def test_guardrail_allows_smart_plug_query():
     # asking which smart plug (Steckdose) works with Alexa is a normal shopping query
     assert safety_guardrail(_Ctx(), _req("Welche Steckdose funktioniert mit Alexa?")) is None
+
+
+def test_every_canonical_ecosystem_name_resolves():
+    from smart_home_agent.catalog.attributes import resolve_ecosystem
+    for name in ("Amazon Alexa", "Google Assistant", "Apple Siri"):
+        assert resolve_ecosystem(name) == name
+
+
+def test_search_never_returns_incompatible_products():
+    from smart_home_agent.tools.recommend import search_products
+    for eco in ("Amazon Alexa", "Google Assistant", "Apple Siri"):
+        for r in search_products(query="bulb", ecosystem=eco)["results"]:
+            assert eco in r["voice_assistants"]
+
+
+def test_unknown_ecosystem_errors_instead_of_unfiltered_search():
+    from smart_home_agent.tools.recommend import search_products
+    assert search_products(query="bulb", ecosystem="Tizen")["status"] == "error"
+
+
+def _lreq(*contents):
+    from google.adk.models.llm_request import LlmRequest
+    return LlmRequest(contents=list(contents))
+
+
+def _user(text):
+    from google.genai import types
+    return types.Content(role="user", parts=[types.Part(text=text)])
+
+
+def _tool_result():
+    from google.genai import types
+    return types.Content(role="user", parts=[types.Part(function_response=types.FunctionResponse(
+        name="search_products", response={"results": [{"title": "Innr Lighting Smart-LED-Lampe"}]}))])
+
+
+class _LCtx:
+    def __init__(self):
+        self.state = {}
+
+
+def test_detect_language_en_de():
+    from smart_home_agent.guardrails.callbacks import detect_language
+    assert detect_language("I use Alexa. Recommend a colour smart bulb.") == "en"
+    assert detect_language("Ich nutze Google. Empfehle mir eine Überwachungskamera.") == "de"
+    assert detect_language("Welches smarte Türschloss funktioniert mit Siri?") == "de"
+
+
+def test_language_pinned_after_german_tool_output():
+    """Regression: English turns drifted to German once German tool results were in context."""
+    from smart_home_agent.guardrails.callbacks import safety_guardrail
+    ctx = _LCtx()
+    req = _lreq(_user("I use Alexa. Recommend a colour smart bulb."), _tool_result())
+    assert safety_guardrail(ctx, req) is None
+    assert ctx.state["user_language"] == "en"
+    assert "REPLY LANGUAGE: English" in req.config.system_instruction
+
+
+def test_german_refusal_for_german_wiring_question():
+    from smart_home_agent.guardrails.callbacks import REFUSAL_DE, safety_guardrail
+    ctx = _LCtx()
+    resp = safety_guardrail(ctx, _lreq(_user("Wie schließe ich das Kabel an die Steckdose an?")))
+    assert resp.content.parts[0].text == REFUSAL_DE

@@ -61,19 +61,38 @@ REFUSAL_DE = (
     "möchten Sie eine Empfehlung?"
 )
 
-_GERMAN_HINTS = {"ich", "wie", "die", "der", "das", "und", "für", "kann", "sie",
-                 "kabel", "anschließen", "steckdose", "installieren"}
+_GERMAN_WORDS = {
+    "ich", "du", "sie", "wir", "mir", "mich", "mein", "meine", "ihr", "ihnen",
+    "der", "die", "das", "den", "dem", "des", "ein", "eine", "einen", "einem",
+    "und", "oder", "aber", "für", "mit", "von", "zu", "zum", "zur", "auf", "im", "in",
+    "ist", "sind", "hat", "habe", "haben", "kann", "können", "möchte", "brauche",
+    "suche", "nutze", "welche", "welcher", "welches", "wie", "was", "wen", "wer",
+    "gibt", "es", "nicht", "kein", "keine", "bitte", "maximal", "unter", "zwei",
+    "empfehle", "empfiehl", "vergleiche", "funktioniert", "smarte", "smartes",
+}
+_EN_WORDS = {"i", "the", "a", "an", "and", "or", "for", "with", "my", "is", "are",
+             "what", "which", "how", "do", "does", "can", "please", "that", "to"}
+
+
+def detect_language(text: str) -> str:
+    """'de' or 'en' for a user message. Stopword vote, umlauts as a tie-breaker."""
+    tokens = _WORD_RE.findall((text or "").lower())
+    de = sum(t in _GERMAN_WORDS for t in tokens)
+    en = sum(t in _EN_WORDS for t in tokens)
+    if de == en:
+        return "de" if re.search(r"[äöüß]", text.lower()) else "en"
+    return "de" if de > en else "en"
 
 
 def _last_user_text(req: LlmRequest) -> str:
+    """Latest user-typed text. Skips function responses, which also carry role 'user'."""
     for content in reversed(req.contents or []):
-        if content.role == "user":
-            return " ".join((part.text or "") for part in (content.parts or [])).lower()
+        if content.role != "user":
+            continue
+        text = " ".join((part.text or "") for part in (content.parts or [])).strip()
+        if text:
+            return text.lower()
     return ""
-
-
-def _looks_german(text: str) -> bool:
-    return len(set(text.split()) & _GERMAN_HINTS) >= 2
 
 
 def _is_wiring(text: str) -> bool:
@@ -98,12 +117,27 @@ def _is_wiring(text: str) -> bool:
 def safety_guardrail(
     callback_context: CallbackContext, llm_request: LlmRequest
 ) -> Optional[LlmResponse]:
-    """Block electrical wiring/installation requests before they reach the model."""
+    """Pin the reply language, then block electrical wiring/installation requests.
+
+    Runs before every model call in a turn, including the calls after tool results.
+    Tool output (titles, prices) is German catalogue data, which used to pull English
+    conversations into German, so the user's language is detected in code and pinned
+    in the system instruction instead of being left to the model.
+    """
     text = _last_user_text(llm_request)
+    if text:
+        callback_context.state["user_language"] = detect_language(text)
+    lang = callback_context.state.get("user_language", "en")
     if _is_wiring(text):
         callback_context.state["guardrail_triggered"] = "safety_wiring"
-        message = REFUSAL_DE if _looks_german(text) else REFUSAL_EN
+        message = REFUSAL_DE if lang == "de" else REFUSAL_EN
         return LlmResponse(
             content=types.Content(role="model", parts=[types.Part(text=message)])
         )
+    name = "German" if lang == "de" else "English"
+    llm_request.append_instructions([
+        f"REPLY LANGUAGE: {name}. The customer wrote in {name}, so write your whole reply in "
+        f"{name}. Tool results and product titles are German catalogue data: keep titles "
+        f"verbatim, but never switch the reply language because of them."
+    ])
     return None

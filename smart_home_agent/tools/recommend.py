@@ -38,6 +38,10 @@ def search_products(query: str = "", ecosystem: str = "", category: str = "", ma
         dict with "status", "count", and a "results" list of matching products.
     """
     eco = resolve_ecosystem(ecosystem) if ecosystem else None
+    if ecosystem and not eco:
+        # Never fall back to an unfiltered search: that would return incompatible products.
+        return {"status": "error",
+                "message": f"Unrecognised ecosystem '{ecosystem}'. Use Amazon Alexa, Google Assistant or Apple Siri."}
     limit = max_price if max_price and max_price > 0 else None
     hits = search(query=query, ecosystem=eco, category=(category or None), max_price=limit, top_k=5)
     return {
